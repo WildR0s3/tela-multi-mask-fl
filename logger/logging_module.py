@@ -2,7 +2,7 @@ import logging
 from logging import LoggerAdapter, getLogger, DEBUG, WARNING, FileHandler, Formatter, Logger as Log
 from enum import IntEnum
 import traceback
-from custom_logs.custom_formatter import CustomFormatter
+from logger.custom_formatter import CustomFormatter
 from pathlib import Path
 from datetime import datetime
 
