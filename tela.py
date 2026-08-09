@@ -83,27 +83,46 @@ class TELA(nn.Module):
             for mask_key, mask_tensor in mask_groups.items():
                 sequence_clone = sequence.clone() # to be verified if this is correct
                 sub_sequence = sequence_clone[2:10]
-                if group_key == 'mask_group_3':
-                    print()
+                # if group_key == 'mask_group_3':
+                #     print()
+                ## below possibly to be improved with .where
                 sub_sequence[(mask_tensor == 0) & (indices % 2 == 0)] = self.mask_action_token
                 sub_sequence[(mask_tensor == 0) & (indices % 2 != 0)] = self.mask_state_token
                 tmp_list.append(sequence_clone)
             masked_seqs[group_key] = tmp_list
               
-        cloned_masked_seqs = {key: [t.clone() for t in tensor_list] for key, tensor_list in masked_seqs.items()}
-        # TODO - convert batch list into a tensor with batch list as first batch element
-        # TODO - add further batches up to 8, with popping from the batches and then again reiterating over those the same as in excell
-        batch_list = []
-        batch_list.extend(masked_seqs['mask_group_1'])
-        for i in range(8):
-            batch_list.append(cloned_masked_seqs['mask_group_2'].pop(i))
-            batch_list.append(cloned_masked_seqs['mask_group_3'].pop(i))
-            batch_list.append(cloned_masked_seqs['mask_group_4'].pop(i))
-            batch_list.append(cloned_masked_seqs['mask_group_5'].pop(i))
-            batch_list.append(cloned_masked_seqs['mask_group_6'].pop(i))
-        batch_list.extend(masked_seqs['mask_group_7'])
-        batch_list.extend(masked_seqs['mask_group_4'][64:]) # add always last 6 that will be skipped
-        batch_list.extend(masked_seqs['mask_group_4'][68:]) # and then again last to to have nice 8
+        all_batches = []
+        for batch_idx in range(8):
+            batch_elements = []
+            for group_key in self.masks.keys():
+                group_tensors = masked_seqs[group_key]
+                num_available = len(group_tensors)
+                for i in range(8):
+                    # we wrap around to get back to the beginning
+                    idx = (batch_idx * 8 + i) % num_available 
+                    batch_elements.append(group_tensors[idx])
+            batch_elements.extend(masked_seqs['mask_group_4'][64:])
+            batch_elements.extend(masked_seqs['mask_group_4'][68:])
+
+            current_batch = torch.stack(batch_elements, dim=0)
+            all_batches.append(current_batch)
+
+        return all_batches
+
+        # cloned_masked_seqs = {key: [t.clone() for t in tensor_list] for key, tensor_list in masked_seqs.items()}
+        # # TODO - convert batch list into a tensor with batch list as first batch element
+        # # TODO - add further batches up to 8, with popping from the batches and then again reiterating over those the same as in excell
+        # batch_list = []
+        # batch_list.extend(masked_seqs['mask_group_1'])
+        # for i in range(8):
+        #     batch_list.append(cloned_masked_seqs['mask_group_2'].pop(i))
+        #     batch_list.append(cloned_masked_seqs['mask_group_3'].pop(i))
+        #     batch_list.append(cloned_masked_seqs['mask_group_4'].pop(i))
+        #     batch_list.append(cloned_masked_seqs['mask_group_5'].pop(i))
+        #     batch_list.append(cloned_masked_seqs['mask_group_6'].pop(i))
+        # batch_list.extend(masked_seqs['mask_group_7'])
+        # batch_list.extend(masked_seqs['mask_group_4'][64:]) # add always last 6 that will be skipped
+        # batch_list.extend(masked_seqs['mask_group_4'][68:]) # and then again last to to have nice 8
 
         print(f"")
 

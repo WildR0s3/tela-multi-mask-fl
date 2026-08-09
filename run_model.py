@@ -7,9 +7,13 @@ import gymnasium as gym
 from maps import Maps
 import math
 
+# TODO - add targets in batch preparation most likely
+# TODO - in forward make predictions for masked tokens
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 SEQ_LENGTH = 11
 EPISODES = 1
+EPOCHS = 10
 initilaize_logger()
 
 
@@ -75,7 +79,12 @@ for i in range(EPISODES):
     epoch_real_states_batches = torch.stack(collected_batches, dim=0)
     epoch_real_rand_actions_batches = torch.stack(collected_actions, dim=0)
 
-    model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
+    batches : list[torch.tensor] = model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
+
+
+    # for epoch in range(EPOCHS):
+    #     for batch_idx 
+
     
     
 

@@ -84,6 +84,7 @@ class CuriosityBuffor:
   
         log(f"Selecting random actions", lte.info)
         return torch.from_numpy(np.random.randint(0, 4, (1, 4))).to(torch.long)[0]
+        # TODO - function to sleect not fully random random actions to have certain directioncd ..
 
 
     def intialize_table(self):
