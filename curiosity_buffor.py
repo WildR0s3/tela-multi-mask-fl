@@ -71,7 +71,7 @@ class CuriosityBuffor:
         """
         It can return random seuqence of actions or take it from buffor. If we have an entry for particular state
         we calculate probability by dividing loss for this sequence by baseline loss (which is loss if our model is fully random)
-        If we don't have well modeled those state sequences it means we will have 100% probability of taknig sequence from buffor
+        If we don't have well modeled those state sequences it means we will have 100% probability of taking sequence from buffor
         If our loss is low (we predict those correctly) we will have low probability to take from buffor we get random sequence instead
         to look for new action-state sequences
         """
@@ -84,7 +84,7 @@ class CuriosityBuffor:
   
         log(f"Selecting random actions", lte.info)
         return torch.from_numpy(np.random.randint(0, 4, (1, 4))).to(torch.long)[0]
-        # TODO - function to sleect not fully random random actions to have certain directioncd ..
+        # TODO - function to sleect not fully random random actions to have certain direction
 
 
     def intialize_table(self):

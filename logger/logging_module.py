@@ -19,11 +19,11 @@ def initilaize_logger():
     logger = Logger(log_path)
 
 class lte(IntEnum):
-    debug = 1
-    info = 2
-    warning = 3
-    error = 4
-    critical = 5
+    debug       = 1
+    info        = 2
+    warning     = 3
+    error       = 4
+    critical    = 5
 
 
 class FilterCsvLines(logging.Filter):

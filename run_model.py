@@ -5,8 +5,8 @@ from masks import Masks
 from curiosity_buffor import CuriosityBuffor, CBPayload
 import gymnasium as gym
 from maps import Maps
-import math
-
+import math, os
+from utils import create_attention_mask
 # TODO - add targets in batch preparation most likely
 # TODO - in forward make predictions for masked tokens
 
@@ -15,14 +15,14 @@ SEQ_LENGTH = 11
 EPISODES = 1
 EPOCHS = 10
 initilaize_logger()
-
+os.environ['SDL_VIDEO_WINDOW_POS'] = '-1280,360' # position gymnasium render window for multi monitor setup
 
 env = gym.make(
     "FrozenLake-v1",
     desc=Maps.clean_4x4,
     max_episode_steps=16, 
     is_slippery=False, 
-    render_mode="rgb_array"  # human or rgb_array
+    render_mode="human"  # human or rgb_array
     )
 
 state_dim = env.observation_space.n 
@@ -40,7 +40,7 @@ for i in range(EPISODES):
     collected_actions = []
 
     counter = 1
-    for j in range(1):
+    for j in range(4):
         actions = cb.select_actions(state)
         real_states_batch = torch.zeros(7, dtype=torch.long) 
         real_states_batch[0] =  16 # START
@@ -77,9 +77,12 @@ for i in range(EPISODES):
 
     log(f"==========\tEpisode {i+1} END\t==========")
     epoch_real_states_batches = torch.stack(collected_batches, dim=0)
+    batch_mask, mask_count = create_attention_mask(epoch_real_states_batches)
+    epoch_real_states_batches[epoch_real_states_batches == -1] = 18
     epoch_real_rand_actions_batches = torch.stack(collected_actions, dim=0)
-
-    batches : list[torch.tensor] = model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
+    logits, mask, p_mask, targets = model_tela.forward(epoch_real_rand_actions_batches, epoch_real_states_batches, batch_mask)
+    model_tela.learn_model(logits)
+    # batches : list[torch.tensor] = model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
 
 
     # for epoch in range(EPOCHS):
