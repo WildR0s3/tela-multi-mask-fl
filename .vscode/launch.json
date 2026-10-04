@@ -5,12 +5,36 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "RUN TELA",
+            "name": "RUN TELA - OLD",
             "type": "debugpy",
             "request": "launch",
             "program": "run_model.py",
             "console": "integratedTerminal",
             "justMyCode": false,
+        },
+                {
+            "name": "RUN TELA",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--embedding-dim", "128",
+                "--action-dim", "4",
+                "--state-dim", "19",
+                "--num-heads", "16",
+                "--num-layers", "6",
+                "--dropout", "0.0",
+                "--learning-rate", "0.001",
+                "--batch-size", "4",
+                "--seq-length", "11",
+                "--episodes", "32",
+                "--epochs", "32",
+                "--start-token", "16",
+                "--term-token", "17",
+                "--pad-token", "18"
+            ]
         },
     ]
 }

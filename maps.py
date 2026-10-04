@@ -9,3 +9,10 @@ class Maps:
         "FFFF",
         "FFFG"
     ]
+
+    holes_4x4 = [
+        "SFFF",
+        "FHFF",
+        "FFHF",
+        "FFFG"
+    ]

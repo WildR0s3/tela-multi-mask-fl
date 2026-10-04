@@ -82,7 +82,7 @@ class CuriosityBuffor:
                 log(f"Selecting buffor actions", lte.info)
                 return self.buffor.loc[start_state, "action_sequence"]
   
-        log(f"Selecting random actions", lte.info)
+        # log(f"Selecting random actions", lte.info)
         return torch.from_numpy(np.random.randint(0, 4, (1, 4))).to(torch.long)[0]
         # TODO - function to sleect not fully random random actions to have certain direction
 

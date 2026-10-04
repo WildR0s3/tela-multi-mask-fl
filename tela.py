@@ -1,4 +1,6 @@
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -20,60 +22,107 @@ from collections import defaultdict
 # TODO - I need probably another classification token that will be the goal and summary from higher level transformer and to higher level transformer
 #        (should it act both ways? in like exchange of token information? token from lower layer, adn goal from higher layer)
 
-EMBEDING_DIM    = 8
-ACTION_DIM      = 4
-STATE_DIM       = 16 + 3 # states + TERM + START, PAD will be masked sbut let's add it here to allow full batch embedding alogn with tid
-DROP_OUT        = 0.0
-NUM_OF_HEADS    = 8
-NUM_OF_LAYERS   = 2
-LEARNING_RATE   = 1e-4
-SEQ_LENGTH      = 11
-DEVICE          = 'cuda' if torch.cuda.is_available() else 'cpu'
-BATCH_SIZE      = 4
+# EMBEDING_DIM    = 128
+# ACTION_DIM      = 4
+# STATE_DIM       = 16 + 3 # states + TERM + START, PAD will be masked sbut let's add it here to allow full batch embedding alogn with tid
+# DROP_OUT        = 0.0
+# NUM_OF_HEADS    = 16
+# NUM_OF_LAYERS   = 6
+# LEARNING_RATE   = 1e-3
+# SEQ_LENGTH      = 11
+# DEVICE          = 'cuda' if torch.cuda.is_available() else 'cpu'
+# BATCH_SIZE      = 4
+# START_TOKEN     = 16
+# TERM_TOKEN      = 17
+# PAD_TOKEN       = 18
 torch.set_printoptions(precision=4, sci_mode=False)
+
+
+@dataclass
+class TrainingConfig:
+    embedding_dim   : int 
+    action_dim      : int 
+    state_dim       : int 
+    drop_out        : float 
+    num_of_heads    : int 
+    num_of_layers   : int
+    learning_rate   : float 
+    seq_length      : int 
+    device          : str
+    batch_size      : int
+    start_token     : int
+    term_token      : int
+    pad_token       : int 
+
 
 class TELA(nn.Module):
 
-    def __init__(self):
+    def __init__(self, args : TrainingConfig):
         super().__init__()
-        self.states_embed = nn.Embedding(STATE_DIM, EMBEDING_DIM)
-        self.action_embed = nn.Embedding(ACTION_DIM, EMBEDING_DIM)
+        self.args = args
+        self.states_embed = nn.Embedding(self.args.state_dim, self.args.embedding_dim)
+        self.action_embed = nn.Embedding(self.args.action_dim, self.args.embedding_dim)
         self.mask_strategy = 'exp'
 
-        self.mask_action_token = nn.Parameter(torch.zeros(1, 1, EMBEDING_DIM))
+        self.mask_action_token = nn.Parameter(torch.zeros(1, 1, self.args.embedding_dim))
         nn.init.normal_(self.mask_action_token, std=0.02)
-        self.mask_state_token = nn.Parameter(torch.zeros(1, 1, EMBEDING_DIM))
+        self.mask_state_token = nn.Parameter(torch.zeros(1, 1, self.args.embedding_dim))
         nn.init.normal_(self.mask_state_token, std=0.02)
 
-        self.pos_embedding = nn.Embedding(SEQ_LENGTH, EMBEDING_DIM)
-        self.action_type_embed = nn.Parameter(torch.randn(1, 1, EMBEDING_DIM))
+        self.pos_embedding = nn.Embedding(self.args.seq_length, self.args.embedding_dim)
+        self.action_type_embed = nn.Parameter(torch.randn(1, 1, self.args.embedding_dim))
         nn.init.normal_(self.action_type_embed, std=0.02)
-        self.state_type_embed = nn.Parameter(torch.randn(1, 1, EMBEDING_DIM))
+        self.state_type_embed = nn.Parameter(torch.randn(1, 1, self.args.embedding_dim))
         nn.init.normal_(self.state_type_embed, std=0.02)
 
-        self.blocks = nn.ModuleList([EncoderBlock(EMBEDING_DIM, NUM_OF_HEADS, DROP_OUT) for _ in range(NUM_OF_LAYERS)])
+        self.blocks = nn.ModuleList([EncoderBlock(self.args.embedding_dim, self.args.num_heads, self.args.drop_out) for _ in range(self.args.num_layers)])
 
-        self.ln_f = nn.LayerNorm(EMBEDING_DIM)
-        self.action_head = nn.Linear(EMBEDING_DIM, ACTION_DIM)
-        self.states_head = nn.Linear(EMBEDING_DIM, STATE_DIM)
+        self.ln_f = nn.LayerNorm(self.args.embedding_dim)
+        self.action_head = nn.Linear(self.args.embedding_dim, self.args.action_dim)
+        self.states_head = nn.Linear(self.args.embedding_dim, self.args.state_dim)
 
         self.criterion = nn.CrossEntropyLoss()
-        self.model_optimizer = torch.optim.AdamW(self.parameters(), lr=LEARNING_RATE) # weight_decay=1e-4 // for a small model remove
+        self.model_optimizer = torch.optim.AdamW(self.parameters(), lr=self.args.learning_rate) # weight_decay=1e-4 // for a small model remove
 
         m = Masks()
-        m.create_masks(SEQ_LENGTH)
+        m.create_masks(self.args.seq_length)
         self.masks = m.masks_dict
         self.repeats = 16
 
 
 
-    def forward(self, actions, states, padding_mask):
+    @staticmethod
+    def build_valid_token_mask(states, args: TrainingConfig):
+        """Mark real tokens; TERM is a state target but not an executed action."""
+        batch_size = states.shape[0]
+        valid = torch.zeros((batch_size, args.seq_length), dtype=torch.bool, device=states.device)
+
+        valid[:, 0] = states[:, 0] != args.pad_token
+        valid[:, 1] = states[:, 1] != args.pad_token
+        num_steps = (args.seq_length - 3) // 2
+        for step in range(num_steps):
+            action_pos = 2 + step * 2
+            state_pos = action_pos + 1
+            previous_state = states[:, step + 1]
+            previous_state_valid = (previous_state != args.pad_token) & (previous_state != args.term_token)
+            next_state_valid = states[:, step + 2] != args.pad_token
+            action_next_state_valid = states[:, step + 2] != args.term_token
+            valid[:, action_pos] = previous_state_valid & next_state_valid & action_next_state_valid
+            valid[:, state_pos] = next_state_valid
+
+        valid[:, 10] = states[:, 6] != args.pad_token
+        return valid
+
+
+    def forward(self, actions, states, valid_token_mask, fixed_mask=None):
+
         states_emb = self.states_embed(states)
         actions_emb = self.action_embed(actions)
         # for i in range(BATCH_SIZE // 8):
-        sequence = torch.zeros((BATCH_SIZE, SEQ_LENGTH, EMBEDING_DIM), device=DEVICE)
+        batch_size = states.shape[0]
+        sequence = torch.zeros((batch_size, self.args.seq_length, self.args.embedding_dim), device=states.device)
 
-        targets = torch.zeros((BATCH_SIZE, SEQ_LENGTH), device=DEVICE)
+        targets = torch.zeros((batch_size, self.args.seq_length), dtype=torch.long, device=states.device)
         targets[:, :2] = states[:, :2]
         targets[:, 2:10:2] = actions
         targets[:, 3::2] = states[:, 2:6]
@@ -82,64 +131,287 @@ class TELA(nn.Module):
         sequence[:, 0] = states_emb[:, 0, :]
         sequence[:, 1] = states_emb[:, 1, :]
 
-        num_steps = (SEQ_LENGTH - 3) // 2
+        num_steps = (self.args.seq_length - 3) // 2
 
-        action_indices = torch.arange(2, 2 + num_steps * 2, step=2, device=DEVICE)
-        state_indices  = torch.arange(3, 3 + num_steps * 2, step=2, device=DEVICE)
+        action_indices = torch.arange(2, 2 + num_steps * 2, step=2, device=self.args.device)
+        state_indices  = torch.arange(3, 3 + num_steps * 2, step=2, device=self.args.device)
 
         sequence[:, action_indices] = actions_emb[:, :num_steps, :]
-        sequence[:, state_indices]  = states_emb[:, :num_steps, :]
-
-        # for j in range((SEQ_LENGTH - 3) // 2):
-        #     action_val = actions_emb[0 , j]
-        #     sequence[(j+1)*2] = action_val
-        #     state_val = states_emb[0, j]
-        #     sequence[((j+1)*2)+1] = state_val
+        sequence[:, state_indices]  = states_emb[:, 2:2+num_steps, :]
 
         sequence[:, 10] = states_emb[:, 6, :]
 
-        x_aug, mask, p_mask = self.process_and_augment_batch(sequence)
+        x_aug, mask, p_mask = self.process_and_augment_batch(sequence, valid_token_mask, fixed_mask)
 
-        indices = torch.arange(SEQ_LENGTH, device=DEVICE)
+        indices = torch.arange(self.args.seq_length, device=states.device)
         is_even = ((indices % 2 == 0).unsqueeze(0).unsqueeze(-1))
         to_be_masked = torch.where(is_even, self.mask_action_token, self.mask_state_token)
-        # TODO - to be verified, especially the size if troch arrange is needed
-        type_embed = torch.where(is_even, self.action_type_embed, self.state_type_embed) 
+
+        # TODO OLD - it needs to be applied, but possibly on merged IDs for the padding_mask is_sepcial legnth matching
+        special_token_ids = [16, 17, 18]
+        is_special_states = torch.isin(states, torch.tensor(special_token_ids, device=states.device))
+        is_special_seq = torch.zeros((batch_size, self.args.seq_length), dtype=torch.bool, device=states.device)
+        state_seq_indices = torch.tensor([0, 1, 3, 5, 7, 9, 10], device=states.device)
+        is_special_seq[:, state_seq_indices] = is_special_states
+        is_data = valid_token_mask.bool() & (~is_special_seq)
+
+        # TODO OLD - to be verified, especially the size if troch arrange is needed
+        is_even_expanded = is_even.expand(is_data.shape[0], -1, -1)
+        type_embed = torch.where(is_even_expanded, self.action_type_embed, self.state_type_embed) 
+        types_embed_adjusted = torch.where(is_data.unsqueeze(-1), type_embed, 0.)
+        types_embed_adjusted = types_embed_adjusted.repeat_interleave(self.repeats, dim=0)
 
         mask_expanded = mask.unsqueeze(-1)
         x_masked = torch.where(mask_expanded == 1.0, to_be_masked, x_aug)
-        position_embed = self.pos_embedding(torch.arange(SEQ_LENGTH, device=DEVICE))
-        # TODO - to be verified addign type embed
-        x = x_masked + position_embed + type_embed 
-        padding_mask_aug = padding_mask.repeat_interleave(self.repeats, dim=0)
+        position_embed = self.pos_embedding(torch.arange(self.args.seq_length, device=states.device))
+        # TODO OLD - to be verified addign type embed
+        x = x_masked + position_embed + types_embed_adjusted 
+        padding_mask_aug = valid_token_mask.repeat_interleave(self.repeats, dim=0)
         for block in self.blocks:
             x = block(x, padding_mask_aug)
         x = self.ln_f(x)
 
-        return x_aug, mask, p_mask, targets
+        x_states = x[:, state_indices, :]   # Shape: (BATCH_SIZE, 4, EMBEDDING_DIM)
+        x_actions = x[:, action_indices, :] # Shape: (BATCH_SIZE, 4, EMBEDDING_DIM)
+
+        logits_states = self.states_head(x_states)   # Shape: (BATCH_SIZE, 4, STATE_DIM)
+        logits_actions = self.action_head(x_actions) # Shape: (BATCH_SIZE, 4, ACTION_DIM)
+        # TODO: assemble sequence back together then compute losses for actions and states and combine them back together
+        return logits_states, logits_actions, mask, p_mask, targets
+
+
+
+    def forward_inference(self, actions, states, mask, padding_mask):
+        """
+        Corrected inference pass matching:
+        states sequence: [start_token, s0, s1, s2, s3, s4, term_token]
+        """
+        batch_size = states.shape[0]
+        
+        # 1. Embed states and actions
+        states_emb = self.states_embed(states)   # (BATCH_SIZE, 7, EMBEDDING_DIM)
+        actions_emb = self.action_embed(actions) # (BATCH_SIZE, 4, EMBEDDING_DIM)
+        
+        # 2. Build sequence representation
+        sequence = torch.zeros((batch_size, self.args.seq_length, self.args.embedding_dim), device=self.args.device)
+        
+        # Place static boundary tokens
+        sequence[:, 0] = states_emb[:, 0, :] # start_sequence_token
+        sequence[:, 1] = states_emb[:, 1, :] # S0
+        sequence[:, 9] = states_emb[:, 5, :] # S4 (Index 5 in states)
+        sequence[:, 10] = states_emb[:, 6, :] # term_token (Index 6 in states)
+        
+        num_steps = (self.args.seq_length - 3) // 2 # 4 steps
+        action_indices = torch.arange(2, 2 + num_steps * 2, step=2, device=self.args.device) # [2, 4, 6, 8]
+        state_indices  = torch.arange(3, 3 + num_steps * 2, step=2, device=self.args.device) # [3, 5, 7, 9]
+        
+        # Interleave actions and middle states (S1, S2, S3, S4)
+        sequence[:, action_indices] = actions_emb[:, :num_steps, :]
+        sequence[:, state_indices]  = states_emb[:, 2:2+num_steps, :] # States S1 to S4 (indices 2,3,4,5)
+        
+        # 3. Inject [MASK] embeddings
+        indices = torch.arange(self.args.seq_length, device=self.args.device)
+        is_even = ((indices % 2 == 0).unsqueeze(0).unsqueeze(-1))
+        
+        to_be_masked = torch.where(is_even, self.mask_action_token, self.mask_state_token)
+        mask_expanded = mask.unsqueeze(-1)
+        sequence_masked = torch.where(mask_expanded, to_be_masked, sequence)
+        
+        # 4. Add positional and type embeddings
+        type_embed = torch.where(is_even, self.action_type_embed, self.state_type_embed)
+        position_embed = self.pos_embedding(indices)
+        
+        x = sequence_masked + position_embed + type_embed
+        
+        # 5. Transformer backbone pass
+        for block in self.blocks:
+            x = block(x, padding_mask)
+        x = self.ln_f(x)
+        
+        # 6. Extract target representations and compute logits
+        x_states = x[:, state_indices, :]   # (BATCH_SIZE, 4, EMBEDDING_DIM) -> predicts S1, S2, S3, S4
+        x_actions = x[:, action_indices, :] # (BATCH_SIZE, 4, EMBEDDING_DIM) -> predicts A0, A1, A2, A3
+        
+        logits_states = self.states_head(x_states)
+        logits_actions = self.action_head(x_actions)
+        
+        return logits_states, logits_actions
+
+    # Why it worked without 'self'?
+    @torch.no_grad()
+    def generate_emigm_3steps(self, model, s0, s4, padding_mask):
+        """
+        Sequence structure:
+        Sequence: [start_seq, S0, A0, S1, A1, S2, A2, S3, A3, S4, term_token]
+        Seq idx:  [    0,     1,  2,  3,  4,  5,  6,  7,  8,  9,     10   ]
+        
+        Targets to predict: [A0, S1, A1, S2, A2, S3, A3] -> Seq indices [2, 3, 4, 5, 6, 7, 8]
+        """
+        model.eval()
+        batch_size = s0.shape[0]
+        
+        # Sequence indices for the 7 predicted tokens
+        gen_seq_indices = torch.tensor([2, 3, 4, 5, 6, 7, 8], device=self.args.device)
+        action_slot_mask = torch.tensor([True, False, True, False, True, False, True], device=self.args.device)
+        
+        # Initialize state and action tensors
+        states = torch.zeros((batch_size, 7), dtype=torch.long, device=self.args.device)
+        actions = torch.zeros((batch_size, 4), dtype=torch.long, device=self.args.device)
+        # states.fill_(18) # use pad token as placeholder
+        # actions.fill_(18) # use pad token as placeholder
+        
+        # Assign known boundary state tokens
+        states[:, 1] = s0 # S0 is at index 1
+        states[:, 5] = s4 # S4 is at index 5
+        states[:, 0] = self.args.start_token # start_seq token
+        states[:, 6] = self.args.term_token
+        
+        # Initialize mask tensor (True = MASKED)
+        seq_mask = torch.zeros((batch_size, self.args.seq_length), dtype=torch.bool, device=self.args.device)
+        seq_mask[:, gen_seq_indices] = True
+        
+        is_slot_masked = torch.ones((batch_size, 7), dtype=torch.bool, device=self.args.device)
+        unmask_schedule = [3, 2, 2]
+        
+        log_v_state = torch.log(torch.tensor(model.states_head.out_features, dtype=torch.float32, device=self.args.device))
+        log_v_action = torch.log(torch.tensor(model.action_head.out_features, dtype=torch.float32, device=self.args.device))
+
+        for num_to_unmask in unmask_schedule:
+            logits_states, logits_actions = model.forward_inference(actions, states, seq_mask, padding_mask)
+            
+            p_states = F.softmax(logits_states, dim=-1)   # Predicts S1, S2, S3, S4
+            p_actions = F.softmax(logits_actions, dim=-1) # Predicts A0, A1, A2, A3
+            
+            ent_states = -torch.sum(p_states * torch.log(p_states + 1e-9), dim=-1) / log_v_state
+            ent_actions = -torch.sum(p_actions * torch.log(p_actions + 1e-9), dim=-1) / log_v_action
+            
+            conf_states = 1.0 - ent_states
+            conf_actions = 1.0 - ent_actions
+            
+            slot_confidences = torch.zeros((batch_size, 7), device=self.args.device)
+            slot_predictions = torch.zeros((batch_size, 7), dtype=torch.long, device=self.args.device)
+            
+            # Actions: Slots 0, 2, 4, 6 -> A0, A1, A2, A3
+            slot_confidences[:, 0::2] = conf_actions
+            slot_predictions[:, 0::2] = torch.argmax(p_actions, dim=-1)
+            
+            # States: Slots 1, 3, 5 -> S1, S2, S3 (indices 0, 1, 2 from states_head)
+            slot_confidences[:, 1::2] = conf_states[:, :3]
+            slot_predictions[:, 1::2] = torch.argmax(p_states[:, :3], dim=-1)
+            
+            # Ignore already unmasked tokens
+            slot_confidences = torch.where(is_slot_masked, slot_confidences, torch.tensor(-1e9, device=self.args.device))
+            
+            # Pick top-k highest confidence tokens per batch
+            _, topk_slot_indices = torch.topk(slot_confidences, k=num_to_unmask, dim=-1)
+            
+            for b in range(batch_size):
+                selected_slots = topk_slot_indices[b]
+                for slot_idx in selected_slots:
+                    is_slot_masked[b, slot_idx] = False
+                    
+                    seq_pos = gen_seq_indices[slot_idx]
+                    seq_mask[b, seq_pos] = False
+                    
+                    pred_token = slot_predictions[b, slot_idx]
+                    if action_slot_mask[slot_idx]:
+                        action_idx = slot_idx // 2
+                        actions[b, action_idx] = pred_token
+                    else:
+                        # Maps slots [1, 3, 5] -> state indices [2, 3, 4] for S1, S2, S3
+                        state_idx = (slot_idx // 2) + 2
+                        states[b, state_idx] = pred_token
+
+        return actions, states
 
     # There are 2 alternatives - below is flattening, or i I can use ignore index in F.cross_entropy
-    def learn_model(self, logits, targets, mask, p_mask=None):
-        logits_flat = logits.reshape(-1, EMBEDING_DIM)
-        targets_flat = targets.reshape(-1)
-        mask_flat = mask.reshape(-1)
-        loss_per_token = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+    def learn_model(self, logits_states, logits_actions, targets, mask, valid_token_mask, i):
 
-        # Apply optional eMIGM schedule weighting: weight = 1 / p_mask
-        if p_mask is not None:
-            p_mask_flat = p_mask.reshape(-1)
-            loss_per_token = loss_per_token / torch.clamp(p_mask_flat, min=1e-3)
+        num_steps = (self.args.seq_length - 3) // 2
 
-        masked_loss = loss_per_token * mask_flat
-        total_masked_tokens = mask_flat.sum()
-        loss = masked_loss.sum()
+        action_indices = torch.arange(2, 2 + num_steps * 2, step=2, device=logits_states.device)
+        state_indices  = torch.arange(3, 3 + num_steps * 2, step=2, device=logits_states.device)
+
+        ## TODO: probably to do it like this one 2026.09.30
+        # Extract target indices corresponding to sequence positions
+        targets_states = targets[:, state_indices].long()
+        targets_states_aug = targets_states.repeat_interleave(self.repeats, dim=0)   # Shape: (BATCH_SIZE, 7)
+        targets_actions = targets[:, action_indices].long() # Shape: (BATCH_SIZE, 4)
+        targets_actions_aug = targets_actions.repeat_interleave(self.repeats, dim=0)
+
+        valid_aug = valid_token_mask.repeat_interleave(self.repeats, dim=0)
+        mask_states = mask[:, state_indices].float() * valid_aug[:, state_indices].float()
+        mask_actions = mask[:, action_indices].float() * valid_aug[:, action_indices].float()
+
+        # Compute standard cross-entropy per head
+        loss_states = F.cross_entropy(
+            logits_states.reshape(-1, self.args.state_dim),
+            targets_states_aug.reshape(-1),
+            reduction="none"
+        ) * mask_states.reshape(-1)
+
+        loss_actions = F.cross_entropy(
+            logits_actions.reshape(-1, self.args.action_dim),
+            targets_actions_aug.reshape(-1),
+            reduction="none"
+        ) * mask_actions.reshape(-1)
+
+        # Combined loss
+        total_masked_tokens = mask_states.sum() + mask_actions.sum()
+        loss = (loss_states.sum() + loss_actions.sum()) / total_masked_tokens.clamp(min=1.0)
+        if i % 8 == 0:
+            log(f"Loss: {loss}")
         self.model_optimizer.zero_grad()
         loss.backward()
         self.model_optimizer.step()
-    
+
+
+    @torch.no_grad()
+    def test_loss(self, actions, states, fixed_mask):
+        """Evaluate fixed examples with a fixed mask, without changing weights."""
+        valid_token_mask = self.build_valid_token_mask(states, self.args)
+        was_training = self.training
+        self.eval()
+        try:
+            logits_states, logits_actions, mask, _, targets = self.forward(
+                actions, states, valid_token_mask, fixed_mask=fixed_mask
+            )
+
+            num_steps = (self.args.seq_length - 3) // 2
+            action_indices = torch.arange(2, 2 + num_steps * 2, step=2, device=states.device)
+            state_indices = torch.arange(3, 3 + num_steps * 2, step=2, device=states.device)
+            targets_states = targets[:, state_indices].repeat_interleave(self.repeats, dim=0)
+            targets_actions = targets[:, action_indices].repeat_interleave(self.repeats, dim=0)
+            valid_aug = valid_token_mask.repeat_interleave(self.repeats, dim=0)
+            state_mask = mask[:, state_indices].bool() & valid_aug[:, state_indices]
+            action_mask = mask[:, action_indices].bool() & valid_aug[:, action_indices]
+
+            state_losses = F.cross_entropy(
+                logits_states.reshape(-1, self.args.state_dim), targets_states.reshape(-1), reduction="none"
+            ).reshape_as(state_mask)
+            action_losses = F.cross_entropy(
+                logits_actions.reshape(-1, self.args.action_dim), targets_actions.reshape(-1), reduction="none"
+            ).reshape_as(action_mask)
+            state_count = state_mask.sum()
+            action_count = action_mask.sum()
+            total_count = state_count + action_count
+            total_loss = (
+                (state_losses * state_mask).sum() + (action_losses * action_mask).sum()
+            ) / total_count.clamp(min=1)
+
+            return {
+                "loss": total_loss.item(),
+                "state_loss": ((state_losses * state_mask).sum() / state_count.clamp(min=1)).item(),
+                "action_loss": ((action_losses * action_mask).sum() / action_count.clamp(min=1)).item(),
+                "state_tokens": state_count.item(),
+                "action_tokens": action_count.item(),
+            }
+        finally:
+            self.train(was_training)
+            
 
     # TODO - test it if it works and make it move forward
-    def process_and_augment_batch(self, x):
+    def process_and_augment_batch(self, x, valid_token_mask, fixed_mask=None):
         """x shape: (bsz, seq_len, embed_dim) -> e.g., (4, 11, d_model)
 
         Returns augmented batch of size (bsz * repeats, seq_len, embed_dim)
@@ -155,115 +427,51 @@ class TELA(nn.Module):
         start_idx, end_idx = 2, 10
         num_eligible = end_idx - start_idx  # 8
 
-        # 3. Sample timesteps t and compute p_mask per augmented sample
-        eps = 1e-3
-        t = torch.rand((aug_bsz, 1), device=device)
-        p_mask_scalar = (1 - eps) * t + eps
+        valid_aug = valid_token_mask.repeat_interleave(self.repeats, dim=0).bool()
+        eligible_valid = valid_aug[:, start_idx:end_idx]
 
-        if self.mask_strategy == "cosine":
-            mask_prob = torch.cos(math.pi / 2 * (1 - p_mask_scalar))
-        elif self.mask_strategy == "linear":
-            mask_prob = p_mask_scalar
-        elif self.mask_strategy == "exp":
-            mask_prob = 1 - torch.exp(-5 * p_mask_scalar)
+        if fixed_mask is not None:
+            if fixed_mask.ndim == 1:
+                fixed_mask = fixed_mask.unsqueeze(0).expand(bsz, -1)
+            if fixed_mask.shape != (bsz, seq_len):
+                raise ValueError(f"fixed_mask must have shape ({seq_len},) or ({bsz}, {seq_len})")
+            fixed_mask = fixed_mask.to(device=device, dtype=torch.bool)
+            mask = torch.zeros((bsz, seq_len), dtype=torch.bool, device=device)
+            mask[:, start_idx:end_idx] = (
+                fixed_mask[:, start_idx:end_idx] & valid_token_mask[:, start_idx:end_idx].bool()
+            )
+            mask = mask.repeat_interleave(self.repeats, dim=0)
+            p_mask = mask.float().mean(dim=1, keepdim=True).expand(-1, seq_len)
+        else:
+            eps = 1e-3
+            t = torch.rand((aug_bsz, 1), device=device)
+            p_mask_scalar = (1 - eps) * t + eps
 
-        # Map p_mask to 1..7 tokens out of 8 slots
-        k_masked = torch.round(1 + mask_prob * (num_eligible - 2)).long()
-        k_masked = torch.clamp(k_masked, min=1, max=7)
+            if self.mask_strategy == "cosine":
+                mask_prob = torch.cos(math.pi / 2 * (1 - p_mask_scalar))
+            elif self.mask_strategy == "linear":
+                mask_prob = p_mask_scalar
+            elif self.mask_strategy == "exp":
+                mask_prob = 1 - torch.exp(-5 * p_mask_scalar)
+            else:
+                raise ValueError(f"Unknown mask strategy: {self.mask_strategy}")
 
-        # 4. Generate unique random mask positions for each repeat
-        rand_vals = torch.rand((aug_bsz, num_eligible), device=device)
-        _, sorted_indices = torch.sort(rand_vals, dim=-1)
-        ranks = torch.argsort(sorted_indices, dim=-1)
+            k_masked = torch.round(1 + mask_prob * (num_eligible - 2)).long().clamp(min=1, max=7)
+            valid_count = eligible_valid.sum(dim=1, keepdim=True)
+            k_masked = torch.minimum(k_masked, valid_count)
 
-        eligible_mask = (ranks < k_masked).float()
+            rand_vals = torch.rand((aug_bsz, num_eligible), device=device)
+            rand_vals = rand_vals.masked_fill(~eligible_valid, float("inf"))
+            sorted_indices = torch.argsort(rand_vals, dim=-1)
+            ranks = torch.argsort(sorted_indices, dim=-1)
+            eligible_mask = (ranks < k_masked) & eligible_valid
 
-        # 5. Build final mask
-        mask = torch.zeros((aug_bsz, seq_len), device=device)
-        mask[:, start_idx:end_idx] = eligible_mask
-
-        p_mask = p_mask_scalar.expand(aug_bsz, seq_len)
+            mask = torch.zeros((aug_bsz, seq_len), dtype=torch.bool, device=device)
+            mask[:, start_idx:end_idx] = eligible_mask
+            p_mask = p_mask_scalar.expand(aug_bsz, seq_len)
 
         return x_aug, mask, p_mask
 
-
-
-    def assemble_masked_sequences(self, states, actions):
-
-        states_emb = self.states_embed(states)
-        actions_emb = self.action_embed(actions)
-        canvas = torch.zeros((BATCH_SIZE, SEQ_LENGTH, EMBEDING_DIM), device=DEVICE)
-
-
-
-    def batch_preparation(self, actions, states):
-        states_emb = self.states_embed(states)
-        actions_emb = self.action_embed(actions)
-        # for i in range(BATCH_SIZE // 8):
-        sequence = torch.zeros((SEQ_LENGTH, EMBEDING_DIM), device=DEVICE)
-
-        sequence[0] = states_emb[0, 0].unsqueeze(0)
-        sequence[1] = states_emb[0, 1].unsqueeze(0)
-
-        for j in range((SEQ_LENGTH - 3) // 2):
-            action_val = actions_emb[0,j]
-            sequence[(j+1)*2] = action_val
-            state_val = states_emb[0, j]
-            sequence[((j+1)*2)+1] = state_val
-
-        sequence[10] = states_emb[0, 6].unsqueeze(0)
-
-        masked_seqs = defaultdict(dict)
-        indices = torch.arange(SEQ_LENGTH - 3)
-
-        for group_key, mask_groups in self.masks.items():
-            log(f"Processing {group_key}")
-            tmp_list = []
-            for mask_key, mask_tensor in mask_groups.items():
-                sequence_clone = sequence.clone() # to be verified if this is correct
-                sub_sequence = sequence_clone[2:10]
-                # if group_key == 'mask_group_3':
-                #     print()
-                ## below possibly to be improved with .where
-                sub_sequence[(mask_tensor == 0) & (indices % 2 == 0)] = self.mask_action_token
-                sub_sequence[(mask_tensor == 0) & (indices % 2 != 0)] = self.mask_state_token
-                tmp_list.append(sequence_clone)
-            masked_seqs[group_key] = tmp_list
-              
-        all_batches = []
-        for batch_idx in range(8):
-            batch_elements = []
-            for group_key in self.masks.keys():
-                group_tensors = masked_seqs[group_key]
-                num_available = len(group_tensors)
-                for i in range(8):
-                    # we wrap around to get back to the beginning
-                    idx = (batch_idx * 8 + i) % num_available 
-                    batch_elements.append(group_tensors[idx])
-            batch_elements.extend(masked_seqs['mask_group_4'][64:])
-            batch_elements.extend(masked_seqs['mask_group_4'][68:])
-
-            current_batch = torch.stack(batch_elements, dim=0)
-            all_batches.append(current_batch)
-
-        return all_batches
-
-        # cloned_masked_seqs = {key: [t.clone() for t in tensor_list] for key, tensor_list in masked_seqs.items()}
-        # # TODO - convert batch list into a tensor with batch list as first batch element
-        # # TODO - add further batches up to 8, with popping from the batches and then again reiterating over those the same as in excell
-        # batch_list = []
-        # batch_list.extend(masked_seqs['mask_group_1'])
-        # for i in range(8):
-        #     batch_list.append(cloned_masked_seqs['mask_group_2'].pop(i))
-        #     batch_list.append(cloned_masked_seqs['mask_group_3'].pop(i))
-        #     batch_list.append(cloned_masked_seqs['mask_group_4'].pop(i))
-        #     batch_list.append(cloned_masked_seqs['mask_group_5'].pop(i))
-        #     batch_list.append(cloned_masked_seqs['mask_group_6'].pop(i))
-        # batch_list.extend(masked_seqs['mask_group_7'])
-        # batch_list.extend(masked_seqs['mask_group_4'][64:]) # add always last 6 that will be skipped
-        # batch_list.extend(masked_seqs['mask_group_4'][68:]) # and then again last to to have nice 8
-
-        print(f"")
 
 
     def random_masking(self, x):
@@ -372,46 +580,6 @@ class TELA(nn.Module):
 
 
 
-
-
-
-
-    def random_masking(self, x):
-        bsz, seq_len, embed_dim = x.shape
-        eps = 1e-3
-        
-        # We will create a mask for each sample individually
-        # to ensure every example in the batch is different
-        final_masks = []
-        p_mask_values = []
-
-        for _ in range(bsz):
-            valid_mask_generated = False
-            while not valid_mask_generated:
-                t = torch.rand((), device=x.device)
-                t = torch.clamp(t, min=self.clamp_t_min)
-                p_val = (1 - eps) * t + eps 
-
-                # Strategy selection (same as your original code)
-                if self.mask_strategy == 'cosine':
-                    mask_prob = torch.cos(math.pi / 2 * (1 - p_val))
-                elif self.mask_strategy == 'linear': 
-                    mask_prob = p_val
-                # ... (include other elifs here) ...
-
-                random_vals = torch.rand((seq_len,), device=x.device)
-                mask = (random_vals < mask_prob).float()
-
-                if mask.sum() >= 2:
-                    valid_mask_generated = True
-                    final_masks.append(mask)
-                    p_mask_values.append(p_val)
-
-        # Stack everything back into tensors
-        mask = torch.stack(final_masks) # Shape (bsz, seq_len)
-        p_mask = torch.stack(p_mask_values).unsqueeze(-1).expand(bsz, seq_len) 
-
-        return mask, p_mask, self.mask_strategy
 
 
 
