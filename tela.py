@@ -22,19 +22,6 @@ from collections import defaultdict
 # TODO - I need probably another classification token that will be the goal and summary from higher level transformer and to higher level transformer
 #        (should it act both ways? in like exchange of token information? token from lower layer, adn goal from higher layer)
 
-# EMBEDING_DIM    = 128
-# ACTION_DIM      = 4
-# STATE_DIM       = 16 + 3 # states + TERM + START, PAD will be masked sbut let's add it here to allow full batch embedding alogn with tid
-# DROP_OUT        = 0.0
-# NUM_OF_HEADS    = 16
-# NUM_OF_LAYERS   = 6
-# LEARNING_RATE   = 1e-3
-# SEQ_LENGTH      = 11
-# DEVICE          = 'cuda' if torch.cuda.is_available() else 'cpu'
-# BATCH_SIZE      = 4
-# START_TOKEN     = 16
-# TERM_TOKEN      = 17
-# PAD_TOKEN       = 18
 torch.set_printoptions(precision=4, sci_mode=False)
 
 
@@ -75,7 +62,7 @@ class TELA(nn.Module):
         self.state_type_embed = nn.Parameter(torch.randn(1, 1, self.args.embedding_dim))
         nn.init.normal_(self.state_type_embed, std=0.02)
 
-        self.blocks = nn.ModuleList([EncoderBlock(self.args.embedding_dim, self.args.num_heads, self.args.drop_out) for _ in range(self.args.num_layers)])
+        self.blocks = nn.ModuleList([EncoderBlock(self.args.embedding_dim, self.args.num_heads, self.args.dropout) for _ in range(self.args.num_layers)])
 
         self.ln_f = nn.LayerNorm(self.args.embedding_dim)
         self.action_head = nn.Linear(self.args.embedding_dim, self.args.action_dim)
@@ -239,7 +226,7 @@ class TELA(nn.Module):
 
     # Why it worked without 'self'?
     @torch.no_grad()
-    def generate_emigm_3steps(self, model, s0, s4, padding_mask):
+    def generate_emigm_3steps(model, s0, s4, padding_mask, args):
         """
         Sequence structure:
         Sequence: [start_seq, S0, A0, S1, A1, S2, A2, S3, A3, S4, term_token]
@@ -251,30 +238,30 @@ class TELA(nn.Module):
         batch_size = s0.shape[0]
         
         # Sequence indices for the 7 predicted tokens
-        gen_seq_indices = torch.tensor([2, 3, 4, 5, 6, 7, 8], device=self.args.device)
-        action_slot_mask = torch.tensor([True, False, True, False, True, False, True], device=self.args.device)
+        gen_seq_indices = torch.tensor([2, 3, 4, 5, 6, 7, 8], device=args.device)
+        action_slot_mask = torch.tensor([True, False, True, False, True, False, True], device=args.device)
         
         # Initialize state and action tensors
-        states = torch.zeros((batch_size, 7), dtype=torch.long, device=self.args.device)
-        actions = torch.zeros((batch_size, 4), dtype=torch.long, device=self.args.device)
+        states = torch.zeros((batch_size, 7), dtype=torch.long, device=args.device)
+        actions = torch.zeros((batch_size, 4), dtype=torch.long, device=args.device)
         # states.fill_(18) # use pad token as placeholder
         # actions.fill_(18) # use pad token as placeholder
         
         # Assign known boundary state tokens
         states[:, 1] = s0 # S0 is at index 1
         states[:, 5] = s4 # S4 is at index 5
-        states[:, 0] = self.args.start_token # start_seq token
-        states[:, 6] = self.args.term_token
+        states[:, 0] = args.start_token # start_seq token
+        states[:, 6] = args.term_token
         
         # Initialize mask tensor (True = MASKED)
-        seq_mask = torch.zeros((batch_size, self.args.seq_length), dtype=torch.bool, device=self.args.device)
+        seq_mask = torch.zeros((batch_size, args.seq_length), dtype=torch.bool, device=args.device)
         seq_mask[:, gen_seq_indices] = True
         
-        is_slot_masked = torch.ones((batch_size, 7), dtype=torch.bool, device=self.args.device)
+        is_slot_masked = torch.ones((batch_size, 7), dtype=torch.bool, device=args.device)
         unmask_schedule = [3, 2, 2]
         
-        log_v_state = torch.log(torch.tensor(model.states_head.out_features, dtype=torch.float32, device=self.args.device))
-        log_v_action = torch.log(torch.tensor(model.action_head.out_features, dtype=torch.float32, device=self.args.device))
+        log_v_state = torch.log(torch.tensor(model.states_head.out_features, dtype=torch.float32, device=args.device))
+        log_v_action = torch.log(torch.tensor(model.action_head.out_features, dtype=torch.float32, device=args.device))
 
         for num_to_unmask in unmask_schedule:
             logits_states, logits_actions = model.forward_inference(actions, states, seq_mask, padding_mask)
@@ -288,8 +275,8 @@ class TELA(nn.Module):
             conf_states = 1.0 - ent_states
             conf_actions = 1.0 - ent_actions
             
-            slot_confidences = torch.zeros((batch_size, 7), device=self.args.device)
-            slot_predictions = torch.zeros((batch_size, 7), dtype=torch.long, device=self.args.device)
+            slot_confidences = torch.zeros((batch_size, 7), device=args.device)
+            slot_predictions = torch.zeros((batch_size, 7), dtype=torch.long, device=args.device)
             
             # Actions: Slots 0, 2, 4, 6 -> A0, A1, A2, A3
             slot_confidences[:, 0::2] = conf_actions
@@ -300,7 +287,7 @@ class TELA(nn.Module):
             slot_predictions[:, 1::2] = torch.argmax(p_states[:, :3], dim=-1)
             
             # Ignore already unmasked tokens
-            slot_confidences = torch.where(is_slot_masked, slot_confidences, torch.tensor(-1e9, device=self.args.device))
+            slot_confidences = torch.where(is_slot_masked, slot_confidences, torch.tensor(-1e9, device=args.device))
             
             # Pick top-k highest confidence tokens per batch
             _, topk_slot_indices = torch.topk(slot_confidences, k=num_to_unmask, dim=-1)
@@ -580,19 +567,6 @@ class TELA(nn.Module):
 
 
 
-
-
-
-    ### How to correctly avoid in crossentropy predicting unmasked tokens
-    # # Ignore unmasked tokens automatically in loss calculation
-    # criterion = nn.CrossEntropyLoss(reduction="mean", ignore_index=-100)
-
-    # # Create targets where unmasked indices are set to -100
-    # targets = true_token_ids.clone()
-    # targets[mask == 0] = -100  # mask: 1 for masked, 0 for unmasked
-
-    # # Compute loss (automatically divides by total count of masked tokens in the batch)
-    # loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
 
 
 
