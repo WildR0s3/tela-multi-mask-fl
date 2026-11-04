@@ -29,7 +29,7 @@
                 "--learning-rate", "0.0003",
                 "--batch-size", "32",
                 "--seq-length", "11",
-                "--episodes", "256",
+                "--episodes", "64",
                 "--epochs", "8",
                 "--start-token", "16",
                 "--term-token", "17",
