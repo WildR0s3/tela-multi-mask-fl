@@ -22,3 +22,18 @@ def create_attention_mask(input_tensor, seq_len=11):
     return mask, mask_count
 
 
+### OPTIMZER LEARNING RATE CONTROL
+# import torch
+
+# optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+# for batch_idx, data in enumerate(dataloader):
+#     # Your training logic here...
+    
+#     # Manual override: After 500 batches, drop LR
+#     if batch_idx == 500:
+#         print("Lowering learning rate...")
+#         for param_group in optimizer.param_groups:
+#             param_group['lr'] = 1e-4  # Set new LR
+
+

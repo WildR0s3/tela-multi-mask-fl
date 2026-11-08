@@ -73,21 +73,21 @@ class Training():
             rollout_count = generated_count + warmup_count
 
             for _ in range(rollout_count):
-                planner_tokens = model_planner.generate(state, self.args)
-                log(f"Planner tokens: {planner_tokens}")
-                for end_state in [planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()]: # [16, 32, 46, 48] planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()
-                    mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
-                    actions_projection, states_pred = model_tela.generate_emigm_3steps(torch.tensor([state]), torch.tensor([end_state]), mask_emigm, args=self.args)
-                    log(f"actions: {actions_projection}")
-                    log(f"states: {states_pred}")
+                # planner_tokens = model_planner.generate(state, self.args)
+                # log(f"Planner tokens: {planner_tokens}")
+                # for end_state in [planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()]: # [16, 32, 46, 48] planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()
+                #     mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
+                #     actions_projection, states_pred = model_tela.generate_emigm_3steps(torch.tensor([state]), torch.tensor([end_state]), mask_emigm, args=self.args)
+                #     log(f"actions: {actions_projection}")
+                #     log(f"states: {states_pred}")
 
-                    # actions = torch.randint(self.args.action_dim, (4,), dtype=torch.long)
+                    actions = torch.randint(self.args.action_dim, (4,), dtype=torch.long)
                     real_states_batch = torch.full((7,), self.args.pad_token, dtype=torch.long)
                     real_states_batch[0] = self.args.start_token
                     real_states_batch[1] = state
                     achieved_reward = False
 
-                    for step, action in enumerate(actions_projection.flatten()):
+                    for step, action in enumerate(actions):
                         new_state, reward, terminated, truncated, info = self.env.step(action.item()) 
                         achieved_reward = achieved_reward or reward > 0
                         real_states_batch[step+2] = new_state
@@ -104,7 +104,7 @@ class Training():
 
                     state = new_state
                     collected_batches.append(real_states_batch)
-                    collected_actions.append(actions_projection)
+                    collected_actions.append(actions)
                     collected_rewards.append(achieved_reward)
                     collected_episode_ends.append(terminated or truncated)
                     if terminated or truncated:
@@ -210,7 +210,7 @@ class Training():
 
         torch.save(model_tela.state_dict(), rf'res\tela_weights_{self.args.map}.pth')
         torch.save(model_planner.state_dict(), rf"res\reward_planner_{self.args.map}.pth")
-
+        log("Models saved")
         # model_tela = TELA().to(self.args.device)
         # model_tela.load_state_dict(torch.load(r'res\tela_weights.pth', map_location=self.args.device))
 

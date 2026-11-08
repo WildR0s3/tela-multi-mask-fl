@@ -64,7 +64,7 @@
                 "--pad-token", "51",
                 "--map", "7x7",
                 "--render-mode", "human",
-                "--execution-mode", "train",
+                "--execution-mode", "test",
                 "--unmask-schedule", "3", "2", "2",
             ]
         },
