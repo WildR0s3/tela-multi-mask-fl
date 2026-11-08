@@ -12,10 +12,10 @@ class RewardPlanner(nn.Module):
     TARGET_POSITIONS = (2, 3, 4, 5, 6, 7, 9)
     TARGET_STATE_POSITIONS = (3, 5, 7, 9)
     TARGET_REWARD_POSITIONS = (2, 4, 6)
-    NO_REWARD_TOKEN = 19
-    REWARD_TOKEN = 20
+    NO_REWARD_TOKEN = 52
+    REWARD_TOKEN = 53
     REWARD_VOCAB_SIZE = 2
-    REWARD_MASK_INDEX = 21
+    REWARD_MASK_INDEX = 54
     MASK_REPEATS = 16
 
     def __init__(self, args):
@@ -196,9 +196,8 @@ class RewardPlanner(nn.Module):
         return 1.0 - entropy / valid_class_count.float().log()
 
     @torch.no_grad()
-    def generate(self, start_states, schedule=(3, 2, 2)):
-        if tuple(schedule) != (3, 2, 2):
-            raise ValueError("planner generation currently uses the fixed 3,2,2 schedule")
+    def generate(self, start_states, args):
+        schedule = args.unmask_schedule
         device = next(self.parameters()).device
         start_states = torch.as_tensor(start_states, dtype=torch.long, device=device).reshape(-1)
         batch_size = start_states.shape[0]

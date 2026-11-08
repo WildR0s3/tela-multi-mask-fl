@@ -16,3 +16,13 @@ class Maps:
         "FFHF",
         "FFFG"
     ]
+
+    clean_7x7 = [
+        "SFFFFFF",
+        "FFFFFFF",
+        "FFFFFFF",
+        "FFFFFFF",
+        "FFFFFFF",
+        "FFFFFFF",
+        "FFFFFFG"
+    ]

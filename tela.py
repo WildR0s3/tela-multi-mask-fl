@@ -236,7 +236,7 @@ class TELA(nn.Module):
         """
         model.eval()
         batch_size = s0.shape[0]
-        
+        unmask_schedule = args.unmask_schedule
         # Sequence indices for the 7 predicted tokens
         gen_seq_indices = torch.tensor([2, 3, 4, 5, 6, 7, 8], device=args.device)
         action_slot_mask = torch.tensor([True, False, True, False, True, False, True], device=args.device)
@@ -258,11 +258,11 @@ class TELA(nn.Module):
         seq_mask[:, gen_seq_indices] = True
         
         is_slot_masked = torch.ones((batch_size, 7), dtype=torch.bool, device=args.device)
-        unmask_schedule = [3, 2, 2]
+        
         
         log_v_state = torch.log(torch.tensor(model.states_head.out_features, dtype=torch.float32, device=args.device))
         log_v_action = torch.log(torch.tensor(model.action_head.out_features, dtype=torch.float32, device=args.device))
-
+   
         for num_to_unmask in unmask_schedule:
             logits_states, logits_actions = model.forward_inference(actions, states, seq_mask, padding_mask)
             

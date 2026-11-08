@@ -26,6 +26,10 @@ def parse_args():
     parser.add_argument("--start-token", type=int, default=16, help="Token index for START")
     parser.add_argument("--term-token", type=int, default=17, help="Token index for TERM")
     parser.add_argument("--pad-token", type=int, default=18, help="Token index for PAD")
+    parser.add_argument("--render-mode", type=str, default="rgb_array", help="Enviroment viisibility")
+    parser.add_argument("--execution-mode", type=str, default="test", help="If you want to train or test")
+    parser.add_argument("--unmask-schedule", nargs='+', type=int, help="Pass numbers separated by spaces")
+    parser.add_argument("--map", type=str, default="4x4",  help="Map type")
 
     # Hardware Environment
     parser.add_argument("--device",type=str, default="cuda" if torch.cuda.is_available() else "cpu",
@@ -41,4 +45,8 @@ if __name__ == "__main__":
     print(f"Device: {args.device}")
     print(f"Learning Rate: {args.learning_rate}")  # Becomes args.learning_rate
     training_instance = Training(args)
-    training_instance.run_model()
+
+    if args.execution_mode == "test":
+        training_instance.test_model()
+    elif args.execution_mode == "train":
+        training_instance.run_model()

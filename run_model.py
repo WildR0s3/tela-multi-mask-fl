@@ -30,14 +30,20 @@ class Training():
         self.args = args
         initilaize_logger()
         os.environ['SDL_VIDEO_WINDOW_POS'] = '-1280,360' # position gymnasium render window for multi monitor setup
+
+        maps = {
+            "4x4" : Maps.clean_4x4,
+            "7x7" : Maps.clean_7x7
+        }
     
         self.env = gym.make(
             "FrozenLake-v1",
-            desc=Maps.clean_4x4,
-            max_episode_steps=16, 
+            desc=maps[args.map],
+            max_episode_steps=64, 
             is_slippery=False, 
-            render_mode="rgb_array"  # human or rgb_array
-            )
+            render_mode=self.args.render_mode  # human or rgb_array
+        )
+
 
 
     def run_model(self):
@@ -48,15 +54,16 @@ class Training():
         replay_count = self.args.batch_size // 2
         generated_count = self.args.batch_size - replay_count
         replay_buffer = CuriosityReplayBuffer(capacity=replay_count)
-        planner_batch_size = max(1, self.args.batch_size // 4)
+        planner_batch_size = 32 # max(1, self.args.batch_size // 4)
         planner_generated_count = math.ceil(generated_count / 4)
-        planner_replay_count = max(0, planner_batch_size - planner_generated_count)
-        planner_buffer = PlannerReplayBuffer(capacity=max(1, planner_replay_count))
+        planner_buffer = PlannerReplayBuffer()
         model_tela = TELA(self.args).to(self.args.device)
         model_planner = RewardPlanner(self.args).to(self.args.device)
 
         for episode_index in range(self.args.episodes):
+  
             state, info = self.env.reset()
+            
             collected_batches = []
             collected_actions = []
             collected_rewards = []
@@ -64,35 +71,44 @@ class Training():
 
             warmup_count = replay_count if len(replay_buffer) == 0 else 0
             rollout_count = generated_count + warmup_count
+
             for _ in range(rollout_count):
-                actions = torch.randint(self.args.action_dim, (4,), dtype=torch.long)
-                real_states_batch = torch.full((7,), self.args.pad_token, dtype=torch.long)
-                real_states_batch[0] = self.args.start_token
-                real_states_batch[1] = state
-                achieved_reward = False
+                planner_tokens = model_planner.generate(state, self.args)
+                log(f"Planner tokens: {planner_tokens}")
+                for end_state in [planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()]: # [16, 32, 46, 48] planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()
+                    mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
+                    actions_projection, states_pred = model_tela.generate_emigm_3steps(torch.tensor([state]), torch.tensor([end_state]), mask_emigm, args=self.args)
+                    log(f"actions: {actions_projection}")
+                    log(f"states: {states_pred}")
 
-                for step, action in enumerate(actions):
-                    new_state, reward, terminated, truncated, info = self.env.step(action.item()) 
-                    achieved_reward = achieved_reward or reward > 0
-                    real_states_batch[step+2] = new_state
+                    # actions = torch.randint(self.args.action_dim, (4,), dtype=torch.long)
+                    real_states_batch = torch.full((7,), self.args.pad_token, dtype=torch.long)
+                    real_states_batch[0] = self.args.start_token
+                    real_states_batch[1] = state
+                    achieved_reward = False
 
-                    if terminated or truncated:
-                        if step < 3:
-                            real_states_batch[step+3] = self.args.term_token
-                            real_states_batch[step+4:] = self.args.pad_token
-                        else:
+                    for step, action in enumerate(actions_projection.flatten()):
+                        new_state, reward, terminated, truncated, info = self.env.step(action.item()) 
+                        achieved_reward = achieved_reward or reward > 0
+                        real_states_batch[step+2] = new_state
+
+                        if terminated or truncated:
+                            if step < 3:
+                                real_states_batch[step+3] = self.args.term_token
+                                real_states_batch[step+4:] = self.args.pad_token
+                            else:
+                                real_states_batch[6] = self.args.term_token
+                            break
+                        if step == 3:
                             real_states_batch[6] = self.args.term_token
-                        break
-                    if step == 3:
-                        real_states_batch[6] = self.args.term_token
 
-                state = new_state
-                collected_batches.append(real_states_batch)
-                collected_actions.append(actions)
-                collected_rewards.append(achieved_reward)
-                collected_episode_ends.append(terminated or truncated)
-                if terminated or truncated:
-                    state, info = self.env.reset()
+                    state = new_state
+                    collected_batches.append(real_states_batch)
+                    collected_actions.append(actions_projection)
+                    collected_rewards.append(achieved_reward)
+                    collected_episode_ends.append(terminated or truncated)
+                    if terminated or truncated:
+                        state, info = self.env.reset()
 
             log(f"==========\tEpisode {episode_index+1} END\t==========")
             generated_states = torch.stack(collected_batches, dim=0).to(self.args.device)
@@ -125,17 +141,12 @@ class Training():
             epoch_real_states_batches = torch.cat((generated_states, replay_states), dim=0)
             valid_token_mask = model_tela.build_valid_token_mask(epoch_real_states_batches, self.args)
 
-            if len(planner_buffer) == 0:
-                planner_buffer.update(model_planner, planner_candidate_tokens)
-            planner_fresh_count = min(planner_candidate_tokens.shape[0], planner_batch_size)
-            planner_replay_count = planner_batch_size - planner_fresh_count
-            if planner_replay_count:
-                replay_planner_tokens = planner_buffer.sample(planner_replay_count, self.args.device)
-                planner_tokens = torch.cat(
-                    (planner_candidate_tokens[:planner_fresh_count], replay_planner_tokens), dim=0
-                )
-            else:
-                planner_tokens = planner_candidate_tokens[:planner_fresh_count]
+            planner_tokens = planner_buffer.prepare_batch(
+                model_planner,
+                planner_candidate_tokens,
+                planner_batch_size,
+                self.args.device,
+            )
 
             if episode_index % 100 == 0:
                 log("Generated actions:")
@@ -143,18 +154,26 @@ class Training():
                 log("Training states (generated then replay):")
                 log(f"\n{epoch_real_states_batches}")
 
+            planner_loss = None
             for epoch_index in range(self.args.epochs):
                 logits_states, logits_actions, mask, p_mask, targets = model_tela.forward(
-                    epoch_real_rand_actions_batches, epoch_real_states_batches,valid_token_mask,)
+                    epoch_real_rand_actions_batches, epoch_real_states_batches, valid_token_mask,)
                 model_tela.learn_model(logits_states, logits_actions,
                                        targets, mask, valid_token_mask, epoch_index,)
-                planner_loss = model_planner.learn_model(planner_tokens)
+                if planner_tokens.shape[0]:
+                    planner_loss = model_planner.learn_model(planner_tokens)
 
             planner_buffer.update(model_planner, planner_candidate_tokens)
+            best_planner_score = planner_buffer.best_score
+            planner_loss_text = f"{planner_loss:.4f}" if planner_loss is not None else "n/a"
+            best_planner_score_text = (
+                f"{best_planner_score:.4f}" if best_planner_score is not None else "n/a"
+            )
             log(
                 f"Planner batch: {planner_tokens.shape[0]} sequences, "
-                f"loss={planner_loss:.4f}, "
-                f"hardest={planner_buffer.entries[0].score:.4f}"
+                f"loss={planner_loss_text}, "
+                f"replay: {planner_buffer.successful_count} successful/"
+                f"{planner_buffer.unique_count} unique, best score={best_planner_score_text}"
             )
 
             replay_buffer.update(model_tela, epoch_real_rand_actions_batches, epoch_real_states_batches,)
@@ -164,35 +183,33 @@ class Training():
                     f"hardest score: {replay_buffer.entries[0].score:.4f}"
                 )
 
-            action_tensor_1 = torch.tensor([[0, 1, 1, 1],
-                                            [3, 0, 2, 3],
-                                            [2, 3, 0, 2],
-                                            [1, 0, 2, 2]]).to(self.args.device)
-            state_tensor_1 = torch.tensor([[16,  0,  0,  4,  8, 12, 17],
-                                            [16, 12,  8,  8,  9,  5, 17],
-                                            [16,  5,  6,  2,  1,  2, 17],
-                                            [16,  2,  6,  5,  6,  7, 17]]).to(self.args.device)
-            fixed_mask = torch.tensor([[False, False,  True,  True,  True,  True, False, False,  True,  True, False],
-                                        [False, False,  True,  True,  True,  True,  True, False,  True, False, False],
-                                        [False, False, False,  True,  True, False,  True,  True,  True, False, False],
-                                        [False, False, False,  True, False,  True,  True, False, False,  True, False]]).to(self.args.device)
-            results_dict = model_tela.test_loss(actions=action_tensor_1, states=state_tensor_1, fixed_mask=fixed_mask)
-            log(f"Test loss: {results_dict['loss']}, state_loss: {results_dict['state_loss']}, action_loss: {results_dict['action_loss']}")
+            # action_tensor_1 = torch.tensor([[0, 1, 1, 1],
+            #                                 [3, 0, 2, 3],
+            #                                 [2, 3, 0, 2],
+            #                                 [1, 0, 2, 2]]).to(self.args.device)
+            # state_tensor_1 = torch.tensor([[16,  0,  0,  4,  8, 12, 17],
+            #                                 [16, 12,  8,  8,  9,  5, 17],
+            #                                 [16,  5,  6,  2,  1,  2, 17],
+            #                                 [16,  2,  6,  5,  6,  7, 17]]).to(self.args.device)
+            # fixed_mask = torch.tensor([[False, False,  True,  True,  True,  True, False, False,  True,  True, False],
+            #                             [False, False,  True,  True,  True,  True,  True, False,  True, False, False],
+            #                             [False, False, False,  True,  True, False,  True,  True,  True, False, False],
+            #                             [False, False, False,  True, False,  True,  True, False, False,  True, False]]).to(self.args.device)
+            # results_dict = model_tela.test_loss(actions=action_tensor_1, states=state_tensor_1, fixed_mask=fixed_mask)
+            # log(f"Test loss: {results_dict['loss']}, state_loss: {results_dict['state_loss']}, action_loss: {results_dict['action_loss']}")
 
-            start_state_example = torch.tensor([0])
-            end_state_example = torch.tensor([5])
+            # start_state_example = torch.tensor([0])
+            # end_state_example = torch.tensor([5])
 
-            mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
-            actions_pred, states_pred = model_tela.generate_emigm_3steps(start_state_example, end_state_example, mask_emigm, args=self.args)
-            log(f"actions: {actions_pred}")
-            log(f"states: {states_pred}")
+            # mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
+            # actions_pred, states_pred = model_tela.generate_emigm_3steps(start_state_example, end_state_example, mask_emigm, args=self.args)
+            # log(f"actions: {actions_pred}")
+            # log(f"states: {states_pred}")
 
             # TODO - call those 2 functions
 
-        # torch.save(model_tela.state_dict(), r'res\tela_weights.pth')
-
-        os.makedirs("res", exist_ok=True)
-        torch.save(model_planner.state_dict(), "res/reward_planner.pth")
+        torch.save(model_tela.state_dict(), rf'res\tela_weights_{self.args.map}.pth')
+        torch.save(model_planner.state_dict(), rf"res\reward_planner_{self.args.map}.pth")
 
         # model_tela = TELA().to(self.args.device)
         # model_tela.load_state_dict(torch.load(r'res\tela_weights.pth', map_location=self.args.device))
@@ -205,7 +222,7 @@ class Training():
         log(f"actions: {actions_pred}")
         log(f"states: {states_pred}")
 
-        planner_tokens = model_planner.generate(start_state_example)
+        planner_tokens = model_planner.generate(start_state_example, self.args)
         log(f"Planner tokens: {planner_tokens}")
 
         start_state_example = torch.tensor([0])
@@ -223,11 +240,15 @@ class Training():
         actions_pred, states_pred = model_tela.generate_emigm_3steps(start_state_example, end_state_example, mask_emigm, args=self.args)
         log(f"actions: {actions_pred}")
         log(f"states: {states_pred}")
-            # batches : list[torch.tensor] = model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
+        # batches : list[torch.tensor] = model_tela.batch_preparation(epoch_real_rand_actions_batches, epoch_real_states_batches)
 
+        # state, info = self.env.reset()
+        # for end_state in [5, 7, 13, 15]:
+        #     actions_pred, states_pred = model_tela.generate_emigm_3steps(torch.tensor([state]), torch.tensor([end_state]), mask_emigm, args=self.args)
+        #     for action in actions_pred.flatten():
+        #         new_state, reward, terminated, truncated, info = self.env.step(action.item())
+        #     state = new_state 
 
-            # for epoch in range(EPOCHS):
-            #     for batch_idx 
 
     def collect_planner_sequences(self, actor_states, achieved_rewards, episode_ends):
         planner_states = []
@@ -282,9 +303,29 @@ class Training():
             planner_rewards.append(rewards)
 
         return torch.stack(planner_states), torch.stack(planner_rewards)
-    
-    
 
 
+
+    def test_model(self):
+
+        model_tela = TELA(self.args).to(self.args.device)
+        model_tela.load_state_dict(torch.load(rf'res\tela_weights_{self.args.map}.pth', map_location=self.args.device))
+        mask_emigm = torch.ones(self.args.seq_length, dtype=torch.float, device=self.args.device)
+
+        model_planner = RewardPlanner(self.args).to(self.args.device)
+        model_planner.load_state_dict(torch.load(rf'res\reward_planner_{self.args.map}.pth', map_location=self.args.device))
+
+        state, info = self.env.reset()
+        planner_tokens = model_planner.generate(torch.tensor([state]), self.args)
+        log(f"Planner tokens: {planner_tokens}")
+        for end_state in [planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()]: # [16, 32, 46, 48] planner_tokens[0][3].item(), planner_tokens[0][5].item(), planner_tokens[0][7].item(), planner_tokens[0][9].item()
+            actions_pred, states_pred = model_tela.generate_emigm_3steps(torch.tensor([state]), torch.tensor([end_state]), mask_emigm, args=self.args)
+            log(f"actions: {actions_pred}")
+            log(f"states: {states_pred}")
+            for action in actions_pred.flatten():
+                new_state, reward, terminated, truncated, info = self.env.step(action.item())
+            state = new_state 
+    
+    
 
 
